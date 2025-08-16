@@ -1,4 +1,4 @@
-# streamlit_app.py — Momentum Chaser Coach (as-of日付指定対応・UI調整版)
+# streamlit_app.py — Momentum Chaser Coach (as-of + shares + P/L)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,7 +7,7 @@ from datetime import date
 
 # ========== ページ設定 ==========
 st.set_page_config(page_title="Momentum Chaser Coach", page_icon="🚀", layout="centered")
-st.title("🚀 Momentum Chaser - ATR / RRR / Trailing Stop (as-of対応)")
+st.title("🚀 Momentum Chaser - ATR / RRR / Trailing Stop (as-of / Shares / P&L)")
 
 # ========== ユーティリティ ==========
 def parse_entries(s: str):
@@ -63,7 +63,6 @@ def fetch_history(sym: str, back_days: int = 900, auto_adjust: bool = False) -> 
     if df is None or df.empty:
         return pd.DataFrame()
     df = _flatten_yf_columns(df)
-    # インデックスを日付に統一（時刻は落とす）
     df = df.copy()
     df.index = pd.to_datetime(df.index).normalize()
     return df
@@ -83,7 +82,13 @@ with st.form(key="mc_form"):
     with c1:
         symbol = st.text_input("銘柄コード（例: 1911.T）", "1911.T").strip()
     with c2:
-        entries_text = st.text_input("エントリー価格（カンマ区切り: 例 1000,1060）", "1000,1060").strip()
+        entries_text = st.text_input("エントリー価格（カンマ区切り: 例 2763,2818）", "1000,1060").strip()
+
+    s1, s2 = st.columns([1,1])
+    with s1:
+        shares_per_entry = st.number_input("単位株数（1回のエントリーあたり）", min_value=1, value=100, step=1)
+    with s2:
+        auto_adj = st.checkbox("終値を調整済みで取得（auto_adjust）", value=False)
 
     st.markdown("**パラメータ**")
     p1, p2, p3 = st.columns([1,1,1])
@@ -97,24 +102,21 @@ with st.form(key="mc_form"):
         target_atr = st.number_input("目標利幅（ATR×）", min_value=1.0, max_value=10.0, value=3.0, step=0.5)
         rrr_min = st.number_input("追加判定の最小RRR", min_value=1.0, max_value=5.0, value=1.5, step=0.1)
 
-    q1, q2 = st.columns([1,1])
-    with q1:
-        check_hi20 = st.checkbox("20日高値ブレイクも要求", value=True)
-    with q2:
-        auto_adj = st.checkbox("終値を調整済みで取得（auto_adjust）", value=False)
-
     st.markdown("**基準日（as-of）**")
     use_asof = st.checkbox("過去日で計算する（as-of固定）", value=False)
     asof_date = st.date_input("基準日（市場営業日でなくてもOK）", value=date.today())
+
     run = st.form_submit_button("計算する")
 
 # ========== 本体 ==========
 if run:
+    # 入力チェック
     entries = parse_entries(entries_text)
     if not entries:
-        st.error("エントリー価格の形式が不正です。例: 1000,1060")
+        st.error("エントリー価格の形式が不正です。例: 2763,2818")
         st.stop()
 
+    # データ取得
     df = fetch_history(symbol, back_days=900, auto_adjust=auto_adj)
     if df.empty:
         st.error("価格データを取得できませんでした。銘柄コードや市場サフィックス（.T）をご確認ください。")
@@ -141,11 +143,9 @@ if run:
                 st.dataframe(df.head(5))
                 st.dataframe(df.tail(5))
             st.stop()
-        # row は as-of 当日が休場でも直近営業日に調整済み
         effective_date = pd.to_datetime(row.name).date()
-        view = df.loc[:row.name]  # as-of（実使用バー）まででカット
+        view = df.loc[:row.name]
     else:
-        # 最新バーで評価
         row = df.dropna(subset=["Close","High","Low","ATR"]).iloc[-1]
         effective_date = pd.to_datetime(row.name).date()
         view = df
@@ -154,6 +154,33 @@ if run:
     atr   = float(row["ATR"])
     hi20  = (float(row["HI20"]) if pd.notna(row["HI20"]) else None)
 
+    # ポジション集計（均等ロット前提）
+    n_entries = len(entries)
+    qty_total = shares_per_entry * n_entries
+    avg_entry = sum(entries) / n_entries
+    notional  = avg_entry * qty_total
+
+    # ストップ（はしご式 + ATRトレイルの高い方）
+    entry0      = entries[0]
+    base_stop   = entry0 - atr_mult_stop * atr
+    ladder_stop = base_stop
+    if n_entries >= 2:
+        ladder_stop = max(ladder_stop, entries[-2])  # 直前エントリー以上
+    trail_stop = (hi20 - atr_mult_trail * atr) if hi20 is not None else None
+    if trail_stop is not None:
+        stop_use = max(ladder_stop, trail_stop)
+        comp     = "max(はしご, ATRトレイル)"
+    else:
+        stop_use = ladder_stop
+        comp     = "はしご"
+
+    # RRR・次の一手
+    next_add_trigger = entries[-1] + add_step_atr * atr
+    risk_per_share   = max(0.0, price - stop_use)
+    reward_per_share = target_atr * atr
+    rrr_now          = (reward_per_share / max(1e-9, risk_per_share)) if risk_per_share > 0 else float("inf")
+
+    # ========== 表示 ==========
     st.subheader("現在値・指標（評価バー）")
     st.write(
         f"**評価日**: {effective_date} / "
@@ -163,20 +190,11 @@ if run:
     if use_asof and effective_date != asof_date:
         st.caption(f"※基準日 {asof_date} は休場または欠損のため、直近営業日 {effective_date} で評価。")
 
-    # ストップ（均等ロット前提・はしご式 + ATRトレイルの高い方）
-    entry0      = entries[0]
-    base_stop   = entry0 - atr_mult_stop * atr
-    ladder_stop = base_stop
-    if len(entries) >= 2:
-        ladder_stop = max(ladder_stop, entries[-2])  # 直前エントリー以上
-
-    trail_stop = (hi20 - atr_mult_trail * atr) if hi20 is not None else None
-    if trail_stop is not None:
-        stop_use = max(ladder_stop, trail_stop)
-        comp     = "max(はしご, ATRトレイル)"
-    else:
-        stop_use = ladder_stop
-        comp     = "はしご"
+    st.subheader("ポジション（均等ロット）")
+    st.write(f"- エントリー: {', '.join(f'{e:.2f}' for e in entries)}")
+    st.write(f"- 1回あたり株数: {shares_per_entry:,} 株 / 回")
+    st.write(f"- 建玉本数: {n_entries} 回  → **総株数: {qty_total:,} 株**")
+    st.write(f"- 平均取得: **{avg_entry:.2f} 円**  / 総建玉額: 約 **{notional:,.0f} 円**")
 
     st.subheader("ストップ")
     st.write(f"- 初期ストップ: {base_stop:.2f}")
@@ -184,25 +202,35 @@ if run:
     st.write(f"- ATRトレイル(20d高値 - {atr_mult_trail:.1f}×ATR): {trail_stop:.2f}" if trail_stop is not None else "- ATRトレイル: NA")
     st.success(f"**推奨ストップ（{comp}）**: {stop_use:.2f}")
 
-    # 次の指値（追加トリガー）と RRR
-    next_add_trigger = entries[-1] + add_step_atr * atr
-    risk_now   = max(1e-9, price - stop_use)   # 推奨ストップ基準の下側リスク
-    reward_now = target_atr * atr              # 上側目安（ATR×）
-    rrr_now    = reward_now / risk_now
+    # P/L（現在・ストップ・目標）
+    st.subheader("含み損益 / リスク&リワード（合計）")
+    pl_now_total    = (price - avg_entry) * qty_total
+    risk_total      = (price - stop_use) * qty_total if stop_use < price else 0.0
+    target_price    = price + reward_per_share
+    reward_total    = (target_price - price) * qty_total
+
+    colA, colB, colC = st.columns(3)
+    with colA:
+        st.metric("含み損益（いま）", f"{pl_now_total:,.0f} 円", help=f"= (現在値 {price:.2f} − 平均 {avg_entry:.2f}) × {qty_total:,}")
+    with colB:
+        st.metric("想定損失（ストップ）", f"{-risk_total:,.0f} 円", help=f"= (現在値 {price:.2f} − ストップ {stop_use:.2f}) × {qty_total:,}")
+    with colC:
+        st.metric("想定利益（目標）", f"{reward_total:,.0f} 円", help=f"= (目標 {target_price:.2f} − 現在値 {price:.2f}) × {qty_total:,}")
+
+    st.caption(f"※ 目標価格 = 現在値 + {target_atr}×ATR = {target_price:.2f} 円 / RRR ≈ {rrr_now:.2f}")
 
     st.subheader("追加条件 & RRR（この位置で追加した場合の目安）")
     cond_line = f"- 追加指値候補: **{next_add_trigger:.2f} 円**"
-    if check_hi20 and hi20 is not None:
-        cond_line += f"（かつ 20日高値 {hi20:.2f} 円ブレイク）"
+    if hi20 is not None:
+        cond_line += f"（20日高値 {hi20:.2f} 円もブレイク要求がデフォルト想定）"
     st.write(cond_line)
-    st.write(f"- 想定RRR: **{rrr_now:.2f}**  (risk={risk_now:.2f}, reward≈{reward_now:.2f}, 最低目安≥{rrr_min})")
+    st.write(f"- 想定RRR: **{rrr_now:.2f}**  (risk/株={risk_per_share:.2f}, reward/株≈{reward_per_share:.2f}, 最低目安≥{rrr_min})")
 
     add_ok = (price >= next_add_trigger) and (rrr_now >= rrr_min)
-    if check_hi20 and hi20 is not None:
+    if hi20 is not None:
         add_ok = add_ok and (price >= hi20)
     st.info("🟢 追加OK（条件達成）") if add_ok else st.warning("🔸 見送り（条件未達 or RRR不足）")
 
-    # 利益確保モード
     st.subheader("モード")
     st.write("✅ 利益確保モード" if stop_use >= entry0 else "—")
 
