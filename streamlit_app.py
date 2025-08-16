@@ -1,4 +1,5 @@
-# streamlit_app.py — Momentum Chaser Coach (as-of + shares + P/L)
+# streamlit_app.py — Momentum Chaser Coach
+# (as-of / Shares / P&L, no verbose logs, hide ".T" in display)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,7 +8,7 @@ from datetime import date
 
 # ========== ページ設定 ==========
 st.set_page_config(page_title="Momentum Chaser Coach", page_icon="🚀", layout="centered")
-st.title("🚀 Momentum Chaser - ATR / RRR / Trailing Stop (as-of / Shares / P&L)")
+st.title("🚀 Momentum Chaser - ATR / RRR / Trailing Stop")
 
 # ========== ユーティリティ ==========
 def parse_entries(s: str):
@@ -36,7 +37,8 @@ def _flatten_yf_columns(df: pd.DataFrame) -> pd.DataFrame:
                 for tok in col:
                     t = str(tok)
                     if t in keys:
-                        chosen = t; break
+                        chosen = t
+                        break
                 new_cols.append(chosen if chosen else str(col[0]))
             else:
                 new_cols.append(str(col))
@@ -76,13 +78,16 @@ def last_valid_row_on_or_before(df: pd.DataFrame, asof: pd.Timestamp, cols=("Clo
         return None
     return view.iloc[-1]
 
+def display_symbol(sym: str) -> str:
+    return sym[:-2] if sym.endswith(".T") else sym
+
 # ========== 入力UI ==========
 with st.form(key="mc_form"):
     c1, c2 = st.columns([1,1])
     with c1:
-        symbol = st.text_input("銘柄コード（例: 1911.T）", "1911.T").strip()
+        symbol = st.text_input("銘柄コード（例: 9513.T）", "9513.T").strip()
     with c2:
-        entries_text = st.text_input("エントリー価格（カンマ区切り: 例 2763,2818）", "1000,1060").strip()
+        entries_text = st.text_input("エントリー価格（カンマ区切り: 例 2763.5,2814,2865）", "1000,1060").strip()
 
     s1, s2 = st.columns([1,1])
     with s1:
@@ -110,13 +115,11 @@ with st.form(key="mc_form"):
 
 # ========== 本体 ==========
 if run:
-    # 入力チェック
     entries = parse_entries(entries_text)
     if not entries:
-        st.error("エントリー価格の形式が不正です。例: 2763,2818")
+        st.error("エントリー価格の形式が不正です。例: 2763.5,2814,2865")
         st.stop()
 
-    # データ取得
     df = fetch_history(symbol, back_days=900, auto_adjust=auto_adj)
     if df.empty:
         st.error("価格データを取得できませんでした。銘柄コードや市場サフィックス（.T）をご確認ください。")
@@ -125,36 +128,28 @@ if run:
     required = {"Open","High","Low","Close"}
     if not required.issubset(df.columns):
         st.error(f"取得データに必要列が不足しています: {list(df.columns)}")
-        with st.expander("取得データ（末尾）"):
-            st.dataframe(df.tail(10))
         st.stop()
 
-    # 指標（全期間で算出）
+    # 指標
     df["ATR"]  = calc_atr_ewm(df, n=int(atr_n))
     df["HI20"] = df["High"].rolling(20, min_periods=1).max()
 
-    # as-of 処理
+    # as-of
     if use_asof:
         asof_ts = pd.to_datetime(asof_date)
         row = last_valid_row_on_or_before(df, asof_ts, cols=("Close","High","Low","ATR"))
         if row is None:
-            st.error("指定の基準日以前に有効なバーが見つかりませんでした（データ不足／銘柄上場前の可能性）。")
-            with st.expander("データ先頭～末尾"):
-                st.dataframe(df.head(5))
-                st.dataframe(df.tail(5))
+            st.error("指定の基準日以前に有効なバーが見つかりませんでした（データ不足／上場前の可能性）。")
             st.stop()
         effective_date = pd.to_datetime(row.name).date()
-        view = df.loc[:row.name]
     else:
         row = df.dropna(subset=["Close","High","Low","ATR"]).iloc[-1]
         effective_date = pd.to_datetime(row.name).date()
-        view = df
 
-    price = float(row["Close"])
-    atr   = float(row["ATR"])
-    hi20  = (float(row["HI20"]) if pd.notna(row["HI20"]) else None)
+    price = float(row["Close"]); atr = float(row["ATR"])
+    hi20 = float(row["HI20"]) if pd.notna(row["HI20"]) else None
 
-    # ポジション集計（均等ロット前提）
+    # ポジション集計（均等ロット）
     n_entries = len(entries)
     qty_total = shares_per_entry * n_entries
     avg_entry = sum(entries) / n_entries
@@ -181,12 +176,11 @@ if run:
     rrr_now          = (reward_per_share / max(1e-9, risk_per_share)) if risk_per_share > 0 else float("inf")
 
     # ========== 表示 ==========
-    st.subheader("現在値・指標（評価バー）")
-    st.write(
-        f"**評価日**: {effective_date} / "
-        f"**終値**: {price:.2f} / **ATR({int(atr_n)})**: {atr:.2f}"
-        + (f" / **20日高値**: {hi20:.2f}" if hi20 is not None else " / **20日高値**: NA")
-    )
+    st.subheader(f"現在値・指標（{display_symbol(symbol)} / 評価バー）")
+    top_caption = f"**評価日**: {effective_date} / **終値**: {price:.2f} / **ATR({int(atr_n)})**: {atr:.2f}"
+    if hi20 is not None:
+        top_caption += f" / **20日高値**: {hi20:.2f}"
+    st.write(top_caption)
     if use_asof and effective_date != asof_date:
         st.caption(f"※基準日 {asof_date} は休場または欠損のため、直近営業日 {effective_date} で評価。")
 
@@ -211,28 +205,27 @@ if run:
 
     colA, colB, colC = st.columns(3)
     with colA:
-        st.metric("含み損益（いま）", f"{pl_now_total:,.0f} 円", help=f"= (現在値 {price:.2f} − 平均 {avg_entry:.2f}) × {qty_total:,}")
+        st.metric("含み損益（いま）", f"{pl_now_total:,.0f} 円", help=f"(現在 {price:.2f} − 平均 {avg_entry:.2f}) × {qty_total:,}")
     with colB:
-        st.metric("想定損失（ストップ）", f"{-risk_total:,.0f} 円", help=f"= (現在値 {price:.2f} − ストップ {stop_use:.2f}) × {qty_total:,}")
+        st.metric("想定損失（ストップ）", f"{-risk_total:,.0f} 円", help=f"(現在 {price:.2f} − 推奨 {stop_use:.2f}) × {qty_total:,}")
     with colC:
-        st.metric("想定利益（目標）", f"{reward_total:,.0f} 円", help=f"= (目標 {target_price:.2f} − 現在値 {price:.2f}) × {qty_total:,}")
+        st.metric("想定利益（目標）", f"{reward_total:,.0f} 円", help=f"(目標 {target_price:.2f} − 現在 {price:.2f}) × {qty_total:,}")
 
     st.caption(f"※ 目標価格 = 現在値 + {target_atr}×ATR = {target_price:.2f} 円 / RRR ≈ {rrr_now:.2f}")
 
     st.subheader("追加条件 & RRR（この位置で追加した場合の目安）")
     cond_line = f"- 追加指値候補: **{next_add_trigger:.2f} 円**"
     if hi20 is not None:
-        cond_line += f"（20日高値 {hi20:.2f} 円もブレイク要求がデフォルト想定）"
+        cond_line += f"（20日高値 {hi20:.2f} 円ブレイクも要求がデフォルト想定）"
     st.write(cond_line)
     st.write(f"- 想定RRR: **{rrr_now:.2f}**  (risk/株={risk_per_share:.2f}, reward/株≈{reward_per_share:.2f}, 最低目安≥{rrr_min})")
 
+    # 明示 if/else（副作用の戻り値をUIに出さない）
     add_ok = (price >= next_add_trigger) and (rrr_now >= rrr_min)
     if hi20 is not None:
         add_ok = add_ok and (price >= hi20)
-    st.info("🟢 追加OK（条件達成）") if add_ok else st.warning("🔸 見送り（条件未達 or RRR不足）")
 
-    st.subheader("モード")
-    st.write("✅ 利益確保モード" if stop_use >= entry0 else "—")
-
-    with st.expander("データ末尾（デバッグ用）"):
-        st.dataframe(view.tail(8))
+    if add_ok:
+        st.info("🟢 追加OK（条件達成）")
+    else:
+        st.warning("🔸 見送り（条件未達 or RRR不足）")
