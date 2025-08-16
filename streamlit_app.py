@@ -1,4 +1,4 @@
-# streamlit_app.py — Momentum Chaser Coach (Ultra-compact / Big CTA at bottom)
+# streamlit_app.py — Momentum Chaser Coach (Compact / Big CTA / price→qty, empty defaults)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -8,7 +8,7 @@ from datetime import date
 st.set_page_config(page_title="Momentum Chaser", page_icon="🚀", layout="centered")
 st.markdown("## 🚀 Momentum Chaser — ATR / RRR / Trailing Stop")
 
-# ---- Simple CSS: make the main button big & prominent ----
+# ---- CSS: 強調ボタン（スマホ前提） ----
 st.markdown("""
 <style>
 div.stButton > button:first-child {
@@ -81,7 +81,7 @@ def last_row_on_or_before(df: pd.DataFrame, asof: pd.Timestamp, cols=("Close","H
     if view.empty: return None
     return view.iloc[-1]
 
-# ========= Inputs (top to bottom) =========
+# ========= Inputs =========
 # 1) 銘柄コード
 symbol_in = st.text_input("銘柄コード（例: 9513）", "9513")
 
@@ -94,17 +94,16 @@ with c_date:
 with c_adj:
     auto_adj = st.checkbox("調整終値（auto_adjust）", value=False)
 
-# 3) エントリー（価格・株数）— テーブルで直感入力
+# 3) エントリー（価格→株数）— 空の表から入力
 st.markdown("#### エントリー（最大5行）")
 st.caption("価格 と 株数 を入力。未使用行は空のままでOK。")
-seed = pd.DataFrame(
-    {"価格": [1000.0, 1060.0, None, None, None], "株数": [100, 100, None, None, None]}
-)
+seed = pd.DataFrame({"価格": [None, None, None, None, None],
+                     "株数": [None, None, None, None, None]})
 edited = st.data_editor(
-    seed, num_rows="fixed", use_container_width=True,
+    seed, num_rows="fixed", use_container_width=True, hide_index=True,
     column_config={
-        "価格": st.column_config.NumberColumn(format="%.2f", step=0.1, help="約定価格"),
-        "株数": st.column_config.NumberColumn(format="%d", step=1, help="株数（整数）")
+        "価格": st.column_config.NumberColumn("価格", format="%.2f", step=0.1, help="約定価格"),
+        "株数": st.column_config.NumberColumn("株数", min_value=0, step=1, help="株数（整数）"),
     }
 )
 
@@ -128,7 +127,7 @@ go = st.button("計算する", use_container_width=True)
 if go:
     symbol = normalize_symbol(symbol_in)
 
-    # エントリー抽出
+    # エントリー抽出（空・NaN行を除外）
     df_in = edited.copy().dropna(how="all").dropna(subset=["価格","株数"])
     try:
         df_in["価格"] = df_in["価格"].astype(float)
