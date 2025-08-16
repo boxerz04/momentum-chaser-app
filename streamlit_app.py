@@ -1,4 +1,4 @@
-# streamlit_app.py — Momentum Chaser Coach (Ultra-compact / Mobile-first)
+# streamlit_app.py — Momentum Chaser Coach (Ultra-compact / Big CTA at bottom)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -8,13 +8,25 @@ from datetime import date
 st.set_page_config(page_title="Momentum Chaser", page_icon="🚀", layout="centered")
 st.markdown("## 🚀 Momentum Chaser — ATR / RRR / Trailing Stop")
 
+# ---- Simple CSS: make the main button big & prominent ----
+st.markdown("""
+<style>
+div.stButton > button:first-child {
+  height: 3rem;
+  font-size: 1.1rem;
+  font-weight: 700;
+  border-radius: 9999px;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ========= Utils =========
 def disp_symbol(sym: str) -> str:
     return sym[:-2] if sym.endswith(".T") else sym
 
 def normalize_symbol(sym: str) -> str:
+    """JP株前提: 入力は '9513' などを想定。内部リクエスト時のみ '.T' を補完。"""
     s = sym.strip().upper()
-    # 数字だけ or 末尾に市場サフィックスが無い場合は .T を補完（JP株想定）
     return s if "." in s else (s + ".T")
 
 def flatten_yf(df: pd.DataFrame) -> pd.DataFrame:
@@ -69,60 +81,55 @@ def last_row_on_or_before(df: pd.DataFrame, asof: pd.Timestamp, cols=("Close","H
     if view.empty: return None
     return view.iloc[-1]
 
-# ========= Top (compact, button first) =========
-with st.form("mc_compact"):
-    # 上段：操作系は最上部
-    bcol, scol = st.columns([1,1])
-    with scol:
-        symbol_in = st.text_input("銘柄コード（例: 9513）", "9513")
-    with bcol:
-        run = st.form_submit_button("計算する", use_container_width=True)
+# ========= Inputs (top to bottom) =========
+# 1) 銘柄コード
+symbol_in = st.text_input("銘柄コード（例: 9513）", "9513")
 
-    # 基準日（折り畳みの外へ移動）
-    asof_row = st.columns([1,1,1])
-    with asof_row[0]:
-        asof_switch = st.checkbox("過去日で評価", value=False)
-    with asof_row[1]:
-        asof_date = st.date_input("基準日", value=date.today())
-    with asof_row[2]:
-        auto_adj = st.checkbox("調整終値（auto_adjust）", value=False)
+# 2) 基準日（過去日で評価）
+c_asof, c_date, c_adj = st.columns([1,1,1])
+with c_asof:
+    asof_switch = st.checkbox("過去日で評価", value=False)
+with c_date:
+    asof_date = st.date_input("基準日", value=date.today())
+with c_adj:
+    auto_adj = st.checkbox("調整終値（auto_adjust）", value=False)
 
-    # エントリー行：表で直感入力（最大5行）
-    st.markdown("#### エントリー（最大5行）")
-    st.caption("価格と株数を入力。未使用行は空のままでOK。")
-    seed = pd.DataFrame(
-        {"価格": [1000.0, 1060.0, None, None, None], "株数": [100, 100, None, None, None]}
-    )
-    edited = st.data_editor(
-        seed, num_rows="fixed", use_container_width=True,
-        column_config={
-            "価格": st.column_config.NumberColumn(format="%.2f", step=0.1, help="約定価格"),
-            "株数": st.column_config.NumberColumn(format="%d", step=1, help="株数（整数）")
-        }
-    )
+# 3) エントリー（価格・株数）— テーブルで直感入力
+st.markdown("#### エントリー（最大5行）")
+st.caption("価格 と 株数 を入力。未使用行は空のままでOK。")
+seed = pd.DataFrame(
+    {"価格": [1000.0, 1060.0, None, None, None], "株数": [100, 100, None, None, None]}
+)
+edited = st.data_editor(
+    seed, num_rows="fixed", use_container_width=True,
+    column_config={
+        "価格": st.column_config.NumberColumn(format="%.2f", step=0.1, help="約定価格"),
+        "株数": st.column_config.NumberColumn(format="%d", step=1, help="株数（整数）")
+    }
+)
 
-    # 詳細パラメータは折り畳み
-    with st.expander("詳細設定", expanded=False):
-        p1, p2, p3 = st.columns(3)
-        with p1:
-            atr_n = st.number_input("ATR期間", 5, 50, 14, 1)
-            atr_mult_stop  = st.number_input("初期ストップ(ATR×)", 0.5, 5.0, 2.0, 0.5)
-        with p2:
-            atr_mult_trail = st.number_input("トレイル倍率(ATR×)", 1.0, 5.0, 2.0, 0.5)
-            require_hi20   = st.checkbox("20日高値ブレイクを目安に含める", value=True)
-        with p3:
-            add_step_atr = st.number_input("追加間隔(ATR×)", 0.5, 5.0, 1.0, 0.1)
-            target_atr   = st.number_input("目標利幅(ATR×)", 1.0, 10.0, 3.0, 0.5)
-            # rrr_min は表示に使わない（判定を出さない方針）
+# 4) 詳細設定（折りたたみ）
+with st.expander("詳細設定", expanded=False):
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        atr_n = st.number_input("ATR期間", 5, 50, 14, 1)
+        atr_mult_stop  = st.number_input("初期ストップ(ATR×)", 0.5, 5.0, 2.0, 0.5)
+    with p2:
+        atr_mult_trail = st.number_input("トレイル倍率(ATR×)", 1.0, 5.0, 2.0, 0.5)
+        require_hi20   = st.checkbox("20日高値ブレイクを目安に含める", value=True)
+    with p3:
+        add_step_atr = st.number_input("次の追加間隔(ATR×)", 0.5, 5.0, 1.0, 0.1)
+        target_atr   = st.number_input("目標利幅(ATR×)", 1.0, 10.0, 3.0, 0.5)
+
+# === Big CTA at bottom ===
+go = st.button("計算する", use_container_width=True)
 
 # ========= Main =========
-if run:
+if go:
     symbol = normalize_symbol(symbol_in)
 
-    # 有効エントリー抽出（最大5行）
-    df_in = edited.copy()
-    df_in = df_in.dropna(how="all")
-    df_in = df_in.dropna(subset=["価格","株数"])
+    # エントリー抽出
+    df_in = edited.copy().dropna(how="all").dropna(subset=["価格","株数"])
     try:
         df_in["価格"] = df_in["価格"].astype(float)
         df_in["株数"] = df_in["株数"].astype(int)
@@ -137,18 +144,18 @@ if run:
     # データ取得
     df = fetch_history(symbol, back_days=900, auto_adjust=auto_adj)
     if df.empty:
-        st.error("価格データを取得できませんでした。銘柄コードや市場サフィックスをご確認ください。")
+        st.error("価格データを取得できませんでした。銘柄コードをご確認ください。")
         st.stop()
     need = {"Open","High","Low","Close"}
     if not need.issubset(df.columns):
         st.error(f"取得データに必要列が不足しています: {list(df.columns)}")
         st.stop()
 
-    # 指標
+    # 指標計算
     df["ATR"]  = calc_atr_ewm(df, n=int(atr_n))
     df["HI20"] = df["High"].rolling(20, min_periods=1).max()
 
-    # as-of
+    # as-of評価
     if asof_switch:
         row = last_row_on_or_before(df, pd.to_datetime(asof_date), cols=("Close","High","Low","ATR"))
         if row is None:
@@ -173,7 +180,7 @@ if run:
     base_stop   = first_price - atr_mult_stop * atr
     ladder_stop = base_stop
     if len(entries) >= 2:
-        prev_price = entries[-2][0]  # 直前（最後から1つ前）
+        prev_price = entries[-2][0]
         ladder_stop = max(ladder_stop, prev_price)
     trail_stop  = (hi20 - atr_mult_trail * atr) if hi20 is not None else None
     if trail_stop is not None:
@@ -183,21 +190,18 @@ if run:
         stop_use = ladder_stop
         stop_basis = "はしご"
 
-    # 追加の“目安”のみ（判定表示はしない）
+    # 次の追加“目安”（判定は出さない）
     last_entry_price = entries[-1][0]
     next_add_price   = last_entry_price + add_step_atr * atr
-    if require_hi20 and hi20 is not None:
-        next_add_note = f"（20日高値 {hi20:.2f} 円も目安）"
-    else:
-        next_add_note = ""
+    next_add_note = f"（20日高値 {hi20:.2f} 円も目安）" if (hi20 is not None and require_hi20) else ""
 
-    # RRR（現状基準の参考値）
+    # RRR（現状ベースの参考値）
     risk_per_share   = max(0.0, price - stop_use)
     reward_per_share = target_atr * atr
     rrr_now = (reward_per_share / risk_per_share) if risk_per_share > 0 else float("inf")
     target_price = price + reward_per_share
 
-    # ===== Display (lean) =====
+    # ===== Display =====
     st.markdown(f"### {disp_symbol(symbol)} — 現在値・指標")
     top = f"**評価日**: {eff_date} / **終値**: {price:.2f} / **ATR({int(atr_n)})**: {atr:.2f}"
     if hi20 is not None: top += f" / **20日高値**: {hi20:.2f}"
