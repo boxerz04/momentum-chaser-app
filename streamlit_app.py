@@ -1,16 +1,16 @@
-# streamlit_app.py — Momentum Chaser Coach (UI調整版・堅牢)
+# streamlit_app.py — Momentum Chaser Coach (as-of日付指定対応・UI調整版)
 import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
+from datetime import date
 
 # ========== ページ設定 ==========
 st.set_page_config(page_title="Momentum Chaser Coach", page_icon="🚀", layout="centered")
-st.title("🚀 Momentum Chaser - ATR / RRR / Trailing Stop (Robust & Tunable)")
+st.title("🚀 Momentum Chaser - ATR / RRR / Trailing Stop (as-of対応)")
 
 # ========== ユーティリティ ==========
 def parse_entries(s: str):
-    """カンマ区切りの価格文字列 -> 昇順のfloat配列"""
     try:
         vals = [float(x) for x in s.split(",") if x.strip() != ""]
         return sorted(vals)
@@ -18,7 +18,6 @@ def parse_entries(s: str):
         return []
 
 def calc_atr_ewm(df: pd.DataFrame, n: int = 14) -> pd.Series:
-    """Wilder系の平滑に近いEMA版ATR"""
     pc = df["Close"].shift(1)
     tr = pd.concat([
         (df["High"] - df["Low"]).abs(),
@@ -28,10 +27,6 @@ def calc_atr_ewm(df: pd.DataFrame, n: int = 14) -> pd.Series:
     return tr.ewm(alpha=1/n, adjust=False).mean()
 
 def _flatten_yf_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    yfinanceのMultiIndex列を単層に正規化し、必要列だけ残す。
-    例: ('Close','1911.T') / ('1911.T','Close') -> 'Close'
-    """
     if isinstance(df.columns, pd.MultiIndex):
         keys = {"Open","High","Low","Close","Adj Close","Volume"}
         new_cols = []
@@ -41,25 +36,19 @@ def _flatten_yf_columns(df: pd.DataFrame) -> pd.DataFrame:
                 for tok in col:
                     t = str(tok)
                     if t in keys:
-                        chosen = t
-                        break
+                        chosen = t; break
                 new_cols.append(chosen if chosen else str(col[0]))
             else:
                 new_cols.append(str(col))
-        df = df.copy()
-        df.columns = new_cols
+        df = df.copy(); df.columns = new_cols
     else:
-        df = df.copy()
-        df.columns = [str(c) for c in df.columns]
-
+        df = df.copy(); df.columns = [str(c) for c in df.columns]
     if "Close" not in df.columns and "Adj Close" in df.columns:
         df = df.rename(columns={"Adj Close": "Close"})
-
     keep = [c for c in ["Open","High","Low","Close","Volume"] if c in df.columns]
     return df[keep]
 
-def fetch_history(sym: str, back_days: int = 420, auto_adjust: bool = False) -> pd.DataFrame:
-    """価格取得（失敗時は.Tを付けて再試行）"""
+def fetch_history(sym: str, back_days: int = 900, auto_adjust: bool = False) -> pd.DataFrame:
     df = yf.download(
         sym, period=f"{back_days}d", interval="1d",
         auto_adjust=auto_adjust, group_by="column",
@@ -73,11 +62,20 @@ def fetch_history(sym: str, back_days: int = 420, auto_adjust: bool = False) -> 
         )
     if df is None or df.empty:
         return pd.DataFrame()
-    return _flatten_yf_columns(df)
+    df = _flatten_yf_columns(df)
+    # インデックスを日付に統一（時刻は落とす）
+    df = df.copy()
+    df.index = pd.to_datetime(df.index).normalize()
+    return df
 
-def last_valid_row(df: pd.DataFrame, cols=("Close","High","Low","ATR")):
-    valid = df.dropna(subset=list(cols))
-    return None if valid.empty else valid.iloc[-1]
+def last_valid_row_on_or_before(df: pd.DataFrame, asof: pd.Timestamp, cols=("Close","High","Low","ATR")):
+    m = (df.index <= asof)
+    if not m.any():
+        return None
+    view = df.loc[m].dropna(subset=list(cols))
+    if view.empty:
+        return None
+    return view.iloc[-1]
 
 # ========== 入力UI ==========
 with st.form(key="mc_form"):
@@ -85,7 +83,7 @@ with st.form(key="mc_form"):
     with c1:
         symbol = st.text_input("銘柄コード（例: 1911.T）", "1911.T").strip()
     with c2:
-        entries_text = st.text_input("エントリー価格（カンマ区切り）", "1000,1060").strip()
+        entries_text = st.text_input("エントリー価格（カンマ区切り: 例 1000,1060）", "1000,1060").strip()
 
     st.markdown("**パラメータ**")
     p1, p2, p3 = st.columns([1,1,1])
@@ -105,18 +103,19 @@ with st.form(key="mc_form"):
     with q2:
         auto_adj = st.checkbox("終値を調整済みで取得（auto_adjust）", value=False)
 
+    st.markdown("**基準日（as-of）**")
+    use_asof = st.checkbox("過去日で計算する（as-of固定）", value=False)
+    asof_date = st.date_input("基準日（市場営業日でなくてもOK）", value=date.today())
     run = st.form_submit_button("計算する")
 
 # ========== 本体 ==========
 if run:
-    # 入力チェック
     entries = parse_entries(entries_text)
     if not entries:
         st.error("エントリー価格の形式が不正です。例: 1000,1060")
         st.stop()
 
-    # データ取得
-    df = fetch_history(symbol, back_days=420, auto_adjust=auto_adj)
+    df = fetch_history(symbol, back_days=900, auto_adjust=auto_adj)
     if df.empty:
         st.error("価格データを取得できませんでした。銘柄コードや市場サフィックス（.T）をご確認ください。")
         st.stop()
@@ -128,33 +127,48 @@ if run:
             st.dataframe(df.tail(10))
         st.stop()
 
-    # 指標
+    # 指標（全期間で算出）
     df["ATR"]  = calc_atr_ewm(df, n=int(atr_n))
     df["HI20"] = df["High"].rolling(20, min_periods=1).max()
 
-    row = last_valid_row(df, cols=("Close","High","Low","ATR"))
-    if row is None or pd.isna(row["ATR"]):
-        st.error("直近バーに有効な価格/ATRがありません（データ欠損/本数不足の可能性）。")
-        st.dataframe(df.tail(10))
-        st.stop()
+    # as-of 処理
+    if use_asof:
+        asof_ts = pd.to_datetime(asof_date)
+        row = last_valid_row_on_or_before(df, asof_ts, cols=("Close","High","Low","ATR"))
+        if row is None:
+            st.error("指定の基準日以前に有効なバーが見つかりませんでした（データ不足／銘柄上場前の可能性）。")
+            with st.expander("データ先頭～末尾"):
+                st.dataframe(df.head(5))
+                st.dataframe(df.tail(5))
+            st.stop()
+        # row は as-of 当日が休場でも直近営業日に調整済み
+        effective_date = pd.to_datetime(row.name).date()
+        view = df.loc[:row.name]  # as-of（実使用バー）まででカット
+    else:
+        # 最新バーで評価
+        row = df.dropna(subset=["Close","High","Low","ATR"]).iloc[-1]
+        effective_date = pd.to_datetime(row.name).date()
+        view = df
 
     price = float(row["Close"])
     atr   = float(row["ATR"])
     hi20  = (float(row["HI20"]) if pd.notna(row["HI20"]) else None)
 
-    # 表示：現在値・指標
-    st.subheader("現在値・指標")
+    st.subheader("現在値・指標（評価バー）")
     st.write(
+        f"**評価日**: {effective_date} / "
         f"**終値**: {price:.2f} / **ATR({int(atr_n)})**: {atr:.2f}"
         + (f" / **20日高値**: {hi20:.2f}" if hi20 is not None else " / **20日高値**: NA")
     )
+    if use_asof and effective_date != asof_date:
+        st.caption(f"※基準日 {asof_date} は休場または欠損のため、直近営業日 {effective_date} で評価。")
 
-    # ストップ（均等ロット想定・はしご式 + ATRトレイルの高い方）
+    # ストップ（均等ロット前提・はしご式 + ATRトレイルの高い方）
     entry0      = entries[0]
     base_stop   = entry0 - atr_mult_stop * atr
     ladder_stop = base_stop
     if len(entries) >= 2:
-        ladder_stop = max(ladder_stop, entries[-2])  # 直前エントリー以上に引き上げ
+        ladder_stop = max(ladder_stop, entries[-2])  # 直前エントリー以上
 
     trail_stop = (hi20 - atr_mult_trail * atr) if hi20 is not None else None
     if trail_stop is not None:
@@ -170,31 +184,27 @@ if run:
     st.write(f"- ATRトレイル(20d高値 - {atr_mult_trail:.1f}×ATR): {trail_stop:.2f}" if trail_stop is not None else "- ATRトレイル: NA")
     st.success(f"**推奨ストップ（{comp}）**: {stop_use:.2f}")
 
-    # 追加条件 & RRR（“次の一段”の目安を提示）
+    # 次の指値（追加トリガー）と RRR
     next_add_trigger = entries[-1] + add_step_atr * atr
-    risk_now   = max(1e-9, price - stop_use)   # 現在の推奨ストップを前提にした下側リスク
+    risk_now   = max(1e-9, price - stop_use)   # 推奨ストップ基準の下側リスク
     reward_now = target_atr * atr              # 上側目安（ATR×）
     rrr_now    = reward_now / risk_now
+
+    st.subheader("追加条件 & RRR（この位置で追加した場合の目安）")
+    cond_line = f"- 追加指値候補: **{next_add_trigger:.2f} 円**"
+    if check_hi20 and hi20 is not None:
+        cond_line += f"（かつ 20日高値 {hi20:.2f} 円ブレイク）"
+    st.write(cond_line)
+    st.write(f"- 想定RRR: **{rrr_now:.2f}**  (risk={risk_now:.2f}, reward≈{reward_now:.2f}, 最低目安≥{rrr_min})")
 
     add_ok = (price >= next_add_trigger) and (rrr_now >= rrr_min)
     if check_hi20 and hi20 is not None:
         add_ok = add_ok and (price >= hi20)
+    st.info("🟢 追加OK（条件達成）") if add_ok else st.warning("🔸 見送り（条件未達 or RRR不足）")
 
-    st.subheader("追加条件 & RRR")
-    cond_line = f"次の追加: 価格≧ {next_add_trigger:.2f}"
-    if check_hi20 and hi20 is not None:
-        cond_line += f" かつ 価格≧ 20日高値({hi20:.2f})"
-    st.write(cond_line)
-    st.write(f"RRR(今追加想定): **{rrr_now:.2f}**  (risk={risk_now:.2f}, reward≈{reward_now:.2f}, 目安≥{rrr_min})")
-
-    if add_ok:
-        st.info("🟢 追加OK（条件達成）")
-    else:
-        st.warning("🔸 見送り（条件未達 or RRR不足）")
-
-    # 利益確保モード表示
+    # 利益確保モード
     st.subheader("モード")
     st.write("✅ 利益確保モード" if stop_use >= entry0 else "—")
 
     with st.expander("データ末尾（デバッグ用）"):
-        st.dataframe(df.tail(8))
+        st.dataframe(view.tail(8))
