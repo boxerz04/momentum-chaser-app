@@ -85,7 +85,7 @@ def display_symbol(sym: str) -> str:
 with st.form(key="mc_form"):
     c1, c2 = st.columns([1,1])
     with c1:
-        symbol = st.text_input("銘柄コード（例: 9513.T）", "9513.T").strip()
+        symbol = st.text_input("銘柄コード（例: 9513.T）", "9513").strip()
     with c2:
         entries_text = st.text_input("エントリー価格（カンマ区切り: 例 2763.5,2814,2865）", "1000,1060").strip()
 
@@ -229,3 +229,4 @@ if run:
         st.info("🟢 追加OK（条件達成）")
     else:
         st.warning("🔸 見送り（条件未達 or RRR不足）")
+
