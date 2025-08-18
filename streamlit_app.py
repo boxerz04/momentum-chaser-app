@@ -1,4 +1,4 @@
-# streamlit_app.py — Momentum Chaser Coach (Compact / Big CTA / price→qty, empty defaults)
+# streamlit_app.py — Momentum Chaser Coach (Compact / Big CTA / price→qty, previous-day HI20)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -74,7 +74,7 @@ def calc_atr_ewm(df: pd.DataFrame, n: int = 14) -> pd.Series:
     ], axis=1).max(axis=1)
     return tr.ewm(alpha=1/n, adjust=False).mean()
 
-def last_row_on_or_before(df: pd.DataFrame, asof: pd.Timestamp, cols=("Close","High","Low","ATR")):
+def last_row_on_or_before(df: pd.DataFrame, asof: pd.Timestamp, cols=("Close","High","Low","ATR","HI20_PREV")):
     m = (df.index <= asof)
     if not m.any(): return None
     view = df.loc[m].dropna(subset=list(cols))
@@ -151,12 +151,18 @@ if go:
         st.stop()
 
     # 指標計算
-    df["ATR"]  = calc_atr_ewm(df, n=int(atr_n))
-    df["HI20"] = df["High"].rolling(20, min_periods=1).max()
+    df["ATR"] = calc_atr_ewm(df, n=int(atr_n))
+
+    # 20日高値を“前日まで”に統一（Momentum Chaser と同じ基準）
+    # 1) 20日ローリング高値（20本そろったときのみ）
+    df["HI20_ROLL"] = df["High"].rolling(20, min_periods=20).max()
+    # 2) それを1日シフトして「前日まで」の値に
+    df["HI20_PREV"] = df["HI20_ROLL"].shift(1)
 
     # as-of評価
     if asof_switch:
-        row = last_row_on_or_before(df, pd.to_datetime(asof_date), cols=("Close","High","Low","ATR"))
+        row = last_row_on_or_before(df, pd.to_datetime(asof_date),
+                                    cols=("Close","High","Low","ATR","HI20_PREV"))
         if row is None:
             st.error("指定基準日以前に有効データが見つかりません（データ不足／上場前の可能性）。")
             st.stop()
@@ -167,7 +173,7 @@ if go:
 
     price = float(row["Close"])
     atr   = float(row["ATR"])
-    hi20  = float(row["HI20"]) if pd.notna(row["HI20"]) else None
+    hi20_prev = float(row["HI20_PREV"]) if pd.notna(row["HI20_PREV"]) else None
 
     # 集計（可変ロット）
     qty_total = int(sum(q for _, q in entries))
@@ -181,7 +187,7 @@ if go:
     if len(entries) >= 2:
         prev_price = entries[-2][0]
         ladder_stop = max(ladder_stop, prev_price)
-    trail_stop  = (hi20 - atr_mult_trail * atr) if hi20 is not None else None
+    trail_stop  = (hi20_prev - atr_mult_trail * atr) if hi20_prev is not None else None
     if trail_stop is not None:
         stop_use = max(ladder_stop, trail_stop)
         stop_basis = "max(はしご, ATRトレイル)"
@@ -192,7 +198,7 @@ if go:
     # 次の追加“目安”（判定は出さない）
     last_entry_price = entries[-1][0]
     next_add_price   = last_entry_price + add_step_atr * atr
-    next_add_note = f"（20日高値 {hi20:.2f} 円も目安）" if (hi20 is not None and require_hi20) else ""
+    next_add_note = f"（20日高値(前日まで) {hi20_prev:.2f} 円も目安）" if (hi20_prev is not None and require_hi20) else ""
 
     # RRR（現状ベースの参考値）
     risk_per_share   = max(0.0, price - stop_use)
@@ -203,7 +209,7 @@ if go:
     # ===== Display =====
     st.markdown(f"### {disp_symbol(symbol)} — 現在値・指標")
     top = f"**評価日**: {eff_date} / **終値**: {price:.2f} / **ATR({int(atr_n)})**: {atr:.2f}"
-    if hi20 is not None: top += f" / **20日高値**: {hi20:.2f}"
+    if hi20_prev is not None: top += f" / **20日高値(前日まで)**: {hi20_prev:.2f}"
     st.write(top)
     if asof_switch and eff_date != asof_date:
         st.caption(f"※基準日 {asof_date} は休場・欠損のため、直近営業日の {eff_date} で評価。")
@@ -218,7 +224,7 @@ if go:
     st.markdown("### ストップ")
     st.write(f"- 初期ストップ（1st基準）: {base_stop:.2f}")
     st.write(f"- はしご式: {ladder_stop:.2f}")
-    st.write(f"- ATRトレイル(20d高値 − {atr_mult_trail:.1f}×ATR): {trail_stop:.2f}" if trail_stop is not None else "- ATRトレイル: NA")
+    st.write(f"- ATRトレイル(20d前日高値 − {atr_mult_trail:.1f}×ATR): {trail_stop:.2f}" if trail_stop is not None else "- ATRトレイル: NA")
     st.success(f"**推奨ストップ（{stop_basis}）: {stop_use:.2f}**")
     st.caption("利益確保モード" if stop_use >= first_price else "—")
 
