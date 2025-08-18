@@ -1,4 +1,5 @@
-# streamlit_app.py — Momentum Chaser Coach (Compact / Big CTA / price→qty, previous-day HI20)
+# streamlit_app.py — Momentum Chaser Coach
+# (Entry-based targets: target = avg_entry + k*ATR, risk = avg_entry - stop)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -153,10 +154,8 @@ if go:
     # 指標計算
     df["ATR"] = calc_atr_ewm(df, n=int(atr_n))
 
-    # 20日高値を“前日まで”に統一（Momentum Chaser と同じ基準）
-    # 1) 20日ローリング高値（20本そろったときのみ）
+    # 20日高値を“前日まで”に統一
     df["HI20_ROLL"] = df["High"].rolling(20, min_periods=20).max()
-    # 2) それを1日シフトして「前日まで」の値に
     df["HI20_PREV"] = df["HI20_ROLL"].shift(1)
 
     # as-of評価
@@ -195,16 +194,21 @@ if go:
         stop_use = ladder_stop
         stop_basis = "はしご"
 
-    # 次の追加“目安”（判定は出さない）
+    # 次の追加“目安”は直近エントリー基準（仕様維持）
     last_entry_price = entries[-1][0]
     next_add_price   = last_entry_price + add_step_atr * atr
     next_add_note = f"（20日高値(前日まで) {hi20_prev:.2f} 円も目安）" if (hi20_prev is not None and require_hi20) else ""
 
-    # RRR（現状ベースの参考値）
-    risk_per_share   = max(0.0, price - stop_use)
-    reward_per_share = target_atr * atr
-    rrr_now = (reward_per_share / risk_per_share) if risk_per_share > 0 else float("inf")
-    target_price = price + reward_per_share
+    # ▼▼▼ ここが重要：目標とRRRを「平均取得」基準に変更 ▼▼▼
+    target_price = avg_entry + target_atr * atr                 # 目標 = 平均取得 + k×ATR
+    risk_per_share_entry   = max(0.0, avg_entry - stop_use)     # リスク/株 = 平均取得 − ストップ（負なら0）
+    reward_per_share_entry = target_atr * atr                   # リワード/株 = k×ATR
+    rrr_entry_basis = (reward_per_share_entry / risk_per_share_entry) if risk_per_share_entry > 0 else float("inf")
+
+    # 表示用（合計損益も“平均取得”基準に揃える）
+    pl_now_total = (price - avg_entry) * qty_total
+    risk_total   = risk_per_share_entry * qty_total
+    reward_total = (target_price - avg_entry) * qty_total
 
     # ===== Display =====
     st.markdown(f"### {disp_symbol(symbol)} — 現在値・指標")
@@ -229,14 +233,11 @@ if go:
     st.caption("利益確保モード" if stop_use >= first_price else "—")
 
     st.markdown("### 含み損益 / リスク&リワード（合計）")
-    pl_now_total = (price - avg_entry) * qty_total
-    risk_total   = (price - stop_use) * qty_total if stop_use < price else 0.0
-    reward_total = (target_price - price) * qty_total
     c1, c2, c3 = st.columns(3)
     c1.metric("含み損益（いま）", f"{pl_now_total:,.0f} 円")
     c2.metric("想定損失（ストップ）", f"{-risk_total:,.0f} 円")
     c3.metric("想定利益（目標）", f"{reward_total:,.0f} 円")
-    st.caption(f"※ 目標価格 = 現在値 + {target_atr}×ATR = {target_price:.2f} 円 / RRR ≈ {rrr_now:.2f}")
+    st.caption(f"※ 目標価格 = 平均取得 + {target_atr}×ATR = {target_price:.2f} 円 / RRR(平均取得基準) ≈ {rrr_entry_basis:.2f}")
 
     st.markdown("### 次の追加（目安）")
     st.write(f"- **候補価格**: {next_add_price:.2f} 円 {next_add_note}")
